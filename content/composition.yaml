@@ -1,0 +1,168 @@
+---
+# Composition (XC)
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: mongodb
+spec:
+  compositeTypeRef:
+    apiVersion: platform.example.com/v1alpha1
+    kind: XMongoDB
+  mode: Pipeline
+  pipeline:
+    # Load composition environment
+    # https://docs.crossplane.io/latest/concepts/environment-configs/
+    # https://github.com/crossplane-contrib/function-go-templating/tree/main/example/context
+    - step: load-composition-environment
+      functionRef:
+        name: function-environment-configs
+      input:
+        apiVersion: environmentconfigs.fn.crossplane.io/v1beta1
+        kind: Input
+        spec:
+          environmentConfigs:
+          - type: Reference
+            ref:
+              name: mongodb
+
+    - step: create-cluster
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            ---
+            # Composite Resource (XR)
+            apiVersion: platform.example.com/v1alpha1
+            kind: Cluster
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: cluster
+              name: mongodb-{{ .observed.composite.resource.spec.claimRef.name }}
+              namespace: {{ .observed.composite.resource.spec.claimRef.namespace }}
+            spec:
+              nodeSize: medium
+              nodeCount: 3
+              storageSize: {{ .observed.composite.resource.spec.storageSize }}
+              version: "1.31.1"
+              cloud:
+                providerName: azure
+
+    - step: add-dns-record
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{ $cluster := getComposedResource . "cluster" }}
+            {{- if ne $cluster nil }}
+            ---
+            # Composite Resource (XR)
+            apiVersion: platform.example.com/v1alpha1
+            kind: DNSRecord
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: dnsrecord
+              name: mongodb-{{ .observed.composite.resource.spec.claimRef.name }}
+              namespace: {{ .observed.composite.resource.spec.claimRef.namespace }}
+            spec:
+              type: A
+              name: {{ .observed.composite.resource.metadata.name }}.mongodbs
+              value: {{ get $cluster.status "ipaddress" }}
+            {{- end }}
+
+    # Store values in ConfigMap
+    - step: store-values
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            ---
+            apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: mongodb-{{ .observed.composite.resource.spec.claimRef.name }}
+              namespace: {{ .observed.composite.resource.spec.claimRef.namespace }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: configmap
+                # Native Kubernetes objects such as ConfigMap do not have a Ready or status field.
+                # By default, they lack `status.conditions` entries, which Crossplane relies on to determine the "Ready" status.
+                # Thus, explicitly mark this ConfigMap as ready.
+                gotemplating.fn.crossplane.io/ready: "True"
+            data:
+              storageSize: "{{ .observed.composite.resource.spec.storageSize }}"
+
+    # Mock database creation delay
+    - step: create-mongodb-nop
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            apiVersion: nop.crossplane.io/v1alpha1
+            kind: NopResource
+            metadata:
+              name: mongodb-{{ .observed.composite.resource.metadata.name }}
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: mongodb
+            spec:
+              forProvider:
+                conditionAfter:
+                - time: 0s
+                  conditionType: Ready
+                  conditionStatus: "False"
+                  conditionReason: "Creating"
+                - time: 30s
+                  conditionType: Ready
+                  conditionStatus: "True"
+                  conditionReason: "Available"
+              providerConfigRef:
+                name: default
+
+    - step: update-status
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{ $dnsrecord := getComposedResource . "dnsrecord" }}
+            ---
+            # Composite Resource (XR)
+            apiVersion: platform.example.com/v1alpha1
+            kind: XMongoDB
+            status:
+              connString: mongodb+srv://<username>:<password>@{{ get $dnsrecord.status "fqdn" }}/{{ .observed.composite.resource.spec.claimRef.name }}
+
+    # Detect readiness
+    - step: detect-readiness
+      functionRef:
+        name: function-auto-ready
+
+    - step: sequence-creation
+      functionRef:
+        name: function-sequencer
+      input:
+        apiVersion: sequencer.fn.crossplane.io/v1beta1
+        kind: Input
+        rules:
+          - sequence:
+            - cluster
+            - dnsrecord
+            - configmap
+            - mongodb

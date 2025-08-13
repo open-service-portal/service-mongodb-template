@@ -1,0 +1,9 @@
+---
+# Composite Resource (XR)
+apiVersion: platform.example.com/v1alpha1
+kind: MongoDB
+metadata:
+  name: ${{ values.name | dump }}
+  namespace: ${{ values.namespace | default('default') | dump }}
+spec:
+  storageSize: ${{ values.storageSize | default(10) }}
