@@ -5,7 +5,7 @@ metadata:
   title: MongoDB Database
   description: Provision a MongoDB database instance using Crossplane
   tags:
-    - crossplane
+    - source:github-import    - crossplane
     - database
     - mongodb
     - infrastructure
